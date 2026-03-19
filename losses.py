@@ -1,67 +1,33 @@
 # coding=utf-8
-# Copyright 2022 The Google Research Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import torch
+import math
 
-"""Loss functions to train DirectionNet."""
-import tensorflow.compat.v1 as tf
-import util
-
+def equirectangular_area_weights(height, device, dtype=torch.float32):
+    pixel_h = math.pi / height
+    colatitude = torch.linspace(pixel_h / 2, math.pi - pixel_h / 2, height, device=device, dtype=dtype)
+    # Shape [1, 1, H, 1] to broadcast with [B, C, H, W]
+    return torch.sin(colatitude).view(1, 1, height, 1)
 
 def direction_loss(v_pred, v_true):
-  """The direction loss measures the negative cosine similarity between vectors.
-
-  Args:
-    v_pred: [BATCH, 3] predicted unit vectors.
-    v_true: [BATCH, 3] ground truth unit vectors.
-
-  Returns:
-    A float scalar.
-
-  Raises:
-    InvalidArgumentError: If 'v_pred' or 'v_true' is not a unit vector.
-  """
-  norm1 = tf.norm(v_pred, axis=-1)
-  norm2 = tf.norm(v_true, axis=-1)
-  one = tf.ones_like(norm1)
-  with tf.control_dependencies([
-      tf.compat.v1.assert_near(norm1, one),
-      tf.compat.v1.assert_near(norm2, one)]):
-    return -tf.reduce_mean(tf.reduce_sum(v_pred * v_true, -1))
-
+    """
+    v_pred: [BATCH, 3]
+    v_true: [BATCH, 3]
+    Returns scalar
+    """
+    # Assuming already unit vectors
+    return -torch.mean(torch.sum(v_pred * v_true, dim=-1))
 
 def distribution_loss(p_pred, p_true):
-  """The distribution loss measures the MSE between spherical distributions.
-
-  Args:
-    p_pred: [BATCH, HEIGHT, WIDTH, N] predicted spherical distributions.
-    p_true: [BATCH, HEIGHT, WIDTH, N] ground truth spherical distributions.
-
-  Returns:
-    A float scalar.
-  """
-  height = p_pred.shape.as_list()[1]
-  return tf.reduce_mean(
-      util.equirectangular_area_weights(height) * (p_pred - p_true)**2)
-
+    """
+    p_pred: [BATCH, C, HEIGHT, WIDTH]
+    p_true: [BATCH, C, HEIGHT, WIDTH]
+    """
+    batch, channels, height, width = p_pred.shape
+    weights = equirectangular_area_weights(height, device=p_pred.device, dtype=p_pred.dtype)
+    return torch.mean(weights * (p_pred - p_true)**2)
 
 def spread_loss(v_pred):
-  """The spread loss penalizes the spherical “variance".
-
-  Args:
-    v_pred: [BATCH, 3] predicted unnormalized vectors.
-
-  Returns:
-    A float scalar.
-  """
-  return 1 - tf.reduce_mean(tf.norm(v_pred, axis=-1))
+    """
+    v_pred: [BATCH, 3]
+    """
+    return 1 - torch.mean(torch.norm(v_pred, dim=-1))
