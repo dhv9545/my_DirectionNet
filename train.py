@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+from torch.utils.tensorboard import SummaryWriter
 
 import dataset_loader
 import losses
@@ -16,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train DirectionNet PyTorch")
     parser.add_argument('--data_dir', type=str, default='data/R90_fov90/test', help='The training data directory.')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save weights')
+    parser.add_argument('--log_dir', type=str, default='./data/logs', help='Directory to save tensorboard logs')
     parser.add_argument('--model', type=str, default='9D', choices=['9D', '6D', 'T'], help='Model type: 9D, 6D, or T')
     parser.add_argument('--batch', type=int, default=2, help='Mini-batch size.')
     parser.add_argument('--n_epoch', type=int, default=10, help='Number of epochs.')
@@ -36,8 +38,14 @@ def main():
     args = parser.parse_args()
     
     os.makedirs(args.checkpoint_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device {device}")
+    
+    # Initialize TensorBoard Writer
+    writer_dir = os.path.join(args.log_dir, f"{args.model}_{int(time.time())}")
+    writer = SummaryWriter(log_dir=writer_dir)
+    print(f"TensorBoard logging to: {writer_dir}")
     
     # Data Loader needs estimated_rot for 'T'
     load_est_rot = (args.model == 'T')
@@ -54,6 +62,15 @@ def main():
     net = model.DirectionNet(n_out=n_out).to(device)
     optimizer = optim.SGD(net.parameters(), lr=args.lr)
     
+    # Log model graph to TensorBoard
+    # Need to replace with approx input dims
+    dummy_src = torch.zeros(1, 3, 256, 256).to(device)
+    dummy_trt = torch.zeros(1, 3, 256, 256).to(device)
+    try:
+        writer.add_graph(net, (dummy_src, dummy_trt))
+    except Exception as e:
+        print(f"Warning: Failed to add graph to tensorboard: {e}")
+        
     print(f'Starting training loop for {args.model}...')
     global_step = 0
     
@@ -126,9 +143,17 @@ def main():
             d_time = time.time() - start_t
             
             if global_step % 10 == 0:
+                err_deg = util.radians_to_degrees(err).item()
                 print(f"Epoch {epoch} Step {global_step} | Loss: {loss.item():.4f} "
-                      f"| {metric_name}: {util.radians_to_degrees(err).item():.2f} "
+                      f"| {metric_name}: {err_deg:.2f} "
                       f"| Time: {d_time:.3f}s")
+                
+                # Log metrics to TensorBoard
+                writer.add_scalar('Loss/Total', loss.item(), global_step)
+                writer.add_scalar('Loss/Direction', dir_loss.item(), global_step)
+                writer.add_scalar('Loss/Distribution', dist_loss.item(), global_step)
+                writer.add_scalar('Loss/Spread', spread_loss.item(), global_step)
+                writer.add_scalar(f'Metrics/{metric_name}', err_deg, global_step)
             
             global_step += 1
             
@@ -136,6 +161,8 @@ def main():
         ckpt_path = os.path.join(args.checkpoint_dir, f'model_{args.model}_epoch_{epoch}.pth')
         torch.save(net.state_dict(), ckpt_path)
         print(f"Saved {ckpt_path}")
+        
+    writer.close()
 
 if __name__ == '__main__':
     main()
