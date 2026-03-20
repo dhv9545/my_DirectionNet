@@ -162,3 +162,74 @@ def distributions_to_directions(x):
     expectation_normalized = F.normalize(expectation, dim=-1)
     return expectation_normalized, expectation, distribution_pred
 
+
+# --- Transformations for Translation Model ---
+def generate_cartesian_grid_pt(resolution, fov, device='cpu'):
+    H, W = resolution
+    fov_rad = fov * math.pi / 180.0
+    width = 2 * math.tan(fov_rad / 2.0)
+    height = width * H / W
+    px_w = width / W
+    px_h = height / H
+    x = torch.linspace(-width/2 + px_w/2, width/2 - px_w/2, W, device=device)
+    y = torch.linspace(height/2 - px_h/2, -height/2 + px_h/2, H, device=device)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+    grid = torch.stack([xx, yy, -torch.ones_like(xx)], dim=-1)
+    return grid
+
+def rotate_image_in_3d_pt(images, input_rotations, input_fov, output_fov, output_shape):
+    B, C, in_H, in_W = images.shape
+    device = images.device
+    out_H, out_W = output_shape
+    cartesian = generate_cartesian_grid_pt(output_shape, output_fov, device)
+    cartesian = cartesian.view(1, out_H, out_W, 3).expand(B, -1, -1, -1)
+    cartesian_flat = cartesian.reshape(B, -1, 3).transpose(1, 2)
+    rotated_coords = torch.bmm(input_rotations.transpose(1, 2), cartesian_flat)
+    rotated_coords = rotated_coords.transpose(1, 2).reshape(B, out_H, out_W, 3)
+    x = -rotated_coords[..., 0] / rotated_coords[..., 2]
+    y = -rotated_coords[..., 1] / rotated_coords[..., 2]
+    in_fov_rad = input_fov * math.pi / 180.0
+    in_w = 2 * torch.tan(in_fov_rad / 2.0).view(B, 1, 1)
+    in_h = 2 * torch.tan(in_fov_rad / 2.0).view(B, 1, 1)
+    grid_x = x / (in_w / 2.0)
+    grid_y = y / (in_h / 2.0)
+    grid_y = -grid_y
+    grid = torch.stack([grid_x, grid_y], dim=-1)
+    return torch.nn.functional.grid_sample(images, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+
+def half_rotation_pt(rot_matrix):
+    B = rot_matrix.shape[0]
+    dev = rot_matrix.device
+    trace = rot_matrix.diagonal(dim1=-2, dim2=-1).sum(-1)
+    theta = torch.acos(torch.clamp((trace - 1.0) / 2.0, -1.0+1e-6, 1.0-1e-6))
+    R_skew = rot_matrix - rot_matrix.transpose(1, 2)
+    sin_theta = torch.sin(theta).unsqueeze(-1)
+    axis = torch.stack([R_skew[:, 2, 1], R_skew[:, 0, 2], R_skew[:, 1, 0]], dim=-1)
+    axis = axis / (2 * sin_theta + 1e-8)
+    half_theta = theta / 2.0
+    K = torch.zeros(B, 3, 3, device=dev)
+    K[:, 0, 1] = -axis[:, 2]
+    K[:, 0, 2] = axis[:, 1]
+    K[:, 1, 0] = axis[:, 2]
+    K[:, 1, 2] = -axis[:, 0]
+    K[:, 2, 0] = -axis[:, 1]
+    K[:, 2, 1] = axis[:, 0]
+    I = torch.eye(3, device=dev).unsqueeze(0).expand(B, -1, -1)
+    sin_h = torch.sin(half_theta).view(B, 1, 1)
+    cos_h = torch.cos(half_theta).view(B, 1, 1)
+    half_R = I + sin_h * K + (1.0 - cos_h) * torch.bmm(K, K)
+    mask = (theta < 1e-5).view(B, 1, 1)
+    return torch.where(mask, I, half_R)
+
+def derotation(src_img, trt_img, rotation, input_fov, output_fov, output_shape, derotate_both):
+    B = src_img.shape[0]
+    device = src_img.device
+    if derotate_both:
+        half_derotation = half_rotation_pt(rotation)
+        transformed_src = rotate_image_in_3d_pt(src_img, half_derotation.transpose(1, 2), input_fov, output_fov, output_shape)
+        transformed_trt = rotate_image_in_3d_pt(trt_img, half_derotation, input_fov, output_fov, output_shape)
+    else:
+        eye = torch.eye(3, device=device).unsqueeze(0).expand(B, -1, -1)
+        transformed_src = rotate_image_in_3d_pt(src_img, eye, input_fov, output_fov, output_shape)
+        transformed_trt = rotate_image_in_3d_pt(trt_img, rotation, input_fov, output_fov, output_shape)
+    return transformed_src, transformed_trt
